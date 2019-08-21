@@ -2,6 +2,8 @@
 
 const validateNpmPackageName = require("validate-npm-package-name");
 
+const importType = require("./importType");
+
 module.exports = {
   meta: {
     type: "layout",
@@ -50,7 +52,7 @@ function extractImportChunks(programNode) {
 
 function maybeReportSorting(imports, context) {
   const sourceCode = context.getSourceCode();
-  const items = getImportItems(imports, sourceCode);
+  const items = getImportItems(imports, sourceCode, context);
   const sorted = printSortedImports(items, sourceCode);
 
   const { start } = items[0];
@@ -70,28 +72,54 @@ function maybeReportSorting(imports, context) {
 }
 
 function printSortedImports(importItems, sourceCode) {
-  const sideEffectImports = [];
-  const packageImports = [];
-  const relativeImports = [];
-  const restImports = [];
+  const imports = {
+    sideEffect: [],
+    absolute: [],
+    builtin: [],
+    internal: [],
+    external: [],
+    parent: [],
+    index: [],
+    sibling: [],
+    unknown: [],
+  };
+  // const sideEffectImports = [];
+  // const absoluteImports = [];
+  // const builtinImports = [];
+  // const internalImports = [];
+  // const externalImports = [];
+  // const parentImports = [];
+  // const indexImports = [];
+  // const siblingImports = [];
 
   for (const item of importItems) {
-    if (item.group === "sideEffect") {
-      sideEffectImports.push(item);
-    } else if (item.group === "package") {
-      packageImports.push(item);
-    } else if (item.group === "relative") {
-      relativeImports.push(item);
-    } else {
-      restImports.push(item);
-    }
+    // if (Object.keys(imports).indexOf(item.group) !== -1) {
+    imports[item.group].push(item);
+    // if (item.group === "sideEffect") {
+    //   sideEffectImports.push(item);
+    // } else if (item.group === "absolute") {
+    //   absoluteImports.push(item);
+    // } else if (item.group === "builtin") {
+    //   builtinImports.push(item);
+    // } else {
+    //   restImports.push(item);
+    // }
   }
 
+  // const sortedItems = [
+  //   sideEffectImports,
+  //   sortImportItems(packageImports),
+  //   sortImportItems(restImports),
+  //   sortImportItems(relativeImports),
+  // ];
   const sortedItems = [
-    sideEffectImports,
-    sortImportItems(packageImports),
-    sortImportItems(restImports),
-    sortImportItems(relativeImports),
+    imports.sideEffect,
+    sortImportItems(imports.builtin),
+    sortImportItems(imports.external),
+    sortImportItems(imports.internal),
+    sortImportItems(imports.parent),
+    sortImportItems(imports.sibling),
+    sortImportItems(imports.index),
   ];
 
   const newline = guessNewline(sourceCode);
@@ -131,7 +159,7 @@ function printSortedImports(importItems, sourceCode) {
 // import. Most importantly there’s a `code` property that contains the import
 // node as a string, with comments (if any). Finding the corresponding comments
 // is the hard part.
-function getImportItems(passedImports, sourceCode) {
+function getImportItems(passedImports, sourceCode, context) {
   const imports = handleLastSemicolon(passedImports, sourceCode);
   return imports.map((importNode, importIndex) => {
     const lastLine =
@@ -192,7 +220,11 @@ function getImportItems(passedImports, sourceCode) {
     const [start] = all[0].range;
     const [, end] = all[all.length - 1].range;
 
-    const { group, source } = getGroupAndSource(importNode, sourceCode);
+    const { group, source } = getGroupAndSource(
+      importNode,
+      sourceCode,
+      context
+    );
 
     return {
       node: importNode,
@@ -795,36 +827,6 @@ function isSideEffectImport(importNode, sourceCode) {
   );
 }
 
-const PACKAGE_REGEX = /^(?:@[^/]+\/)?[^/]+/;
-
-// import fs from "fs";
-// import { compose } from "lodash/fp";
-// import { storiesOf } from '@storybook/react';
-function isPackageImport(source) {
-  const match = PACKAGE_REGEX.exec(source);
-  if (match == null) {
-    return false;
-  }
-  const { errors = [], warnings = [] } = validateNpmPackageName(match[0]);
-  return (
-    errors.length === 0 &&
-    warnings.filter(warning => !warning.includes("core module")).length === 0
-  );
-}
-
-// import a from "."
-// import a from "./x"
-// import a from ".."
-// import a from "../x"
-function isRelativeImport(source) {
-  return (
-    source === "." ||
-    source === ".." ||
-    source.startsWith("./") ||
-    source.startsWith("../")
-  );
-}
-
 function isIdentifier(node) {
   return node.type === "Identifier";
 }
@@ -854,37 +856,23 @@ function isNewline(node) {
 //     import x from "webpack-loader!./index.js"
 //                                   ^^^^^^^^^^
 // Loader syntax documentation: https://webpack.js.org/concepts/loaders/#inline
-function getGroupAndSource(importNode, sourceCode) {
+function getGroupAndSource(importNode, sourceCode, context) {
   const rawSource = importNode.source.value;
   const index = rawSource.lastIndexOf("!");
   const [source, webpack] =
     index >= 0
       ? [rawSource.slice(index + 1), rawSource.slice(0, index + 1)]
       : [rawSource, ""];
+  const name = importNode.source.value;
   const group = isSideEffectImport(importNode, sourceCode)
     ? "sideEffect"
-    : isPackageImport(source)
-    ? "package"
-    : isRelativeImport(source)
-    ? "relative"
-    : "rest";
+    : importType(name, context);
 
   return {
     group,
     source: {
       source:
-        group === "relative"
-          ? // Due to "." sorting before "/" by default, relative imports are
-            // automatically sorted in a logical manner for us: Imports from files
-            // further up come first, with deeper imports last. There’s one
-            // exception, though: When the `from` part ends with one or two dots:
-            // "." and "..". Those are supposed to sort just like "./", "../". So
-            // add in the slash for them. (No special handling is done for cases
-            // like "./a/.." because nobody writes that anyway.)
-            source === "." || source === ".."
-            ? `${source}/`
-            : source
-          : group === "rest"
+        group === "unknown"
           ? // This makes ASCII letters and digits sort first. When using
             // `Intl.Collator`, `\t` followed by a letter sorts first (while `\0`
             // followed by a letter comes a lot later!).
